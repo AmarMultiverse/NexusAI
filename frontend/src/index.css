@@ -1,0 +1,4 @@
+/* Tailwind ke core styles aur utility classes ko import kar rahe hain */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
