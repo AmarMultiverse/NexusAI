@@ -15,7 +15,7 @@ const Register = () => {
 
     try {
       // Sending form data to the backend API
-      const response = await axios.post('http://localhost:5000/api/auth/register', formData);
+      const response = await axios.post('https://nexusai-backend-966g.onrender.com/api/auth/register', formData);
       toast.success(response.data.message); // Show success notification
       navigate('/login'); // Redirect to login page upon successful registration
     } catch (error) {

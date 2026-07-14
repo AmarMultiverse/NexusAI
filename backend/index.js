@@ -29,7 +29,7 @@ app.use('/api/chat', chatRoutes); // <-- NEW LINE
 connectDB();
 
 // 6. Create a basic API route (To verify the server is running properly)
-// This code executes when someone visits 'http://localhost:5000/' in the browser
+// This code executes when someone visits 'https://nexusai-backend-966g.onrender.com/' in the browser
 app.get('/', (req, res) => {
     res.send("Hello from NexusAI Backend! The server is running smoothly. 🚀");
 });

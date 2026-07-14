@@ -53,7 +53,7 @@ const Chat = () => {
   // Sidebar Load: Fetch all sessions (titles) from the backend on page load
   const fetchSessions = async () => {
     try {
-      const res = await fetch('http://localhost:5000/api/chat/sessions', {
+      const res = await fetch('https://nexusai-backend-966g.onrender.com/api/chat/sessions', {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -78,7 +78,7 @@ const Chat = () => {
         return;
       }
       try {
-        const res = await fetch(`http://localhost:5000/api/chat/history/${currentSessionId}`, {
+        const res = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/history/${currentSessionId}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (res.ok) {
@@ -118,7 +118,7 @@ const Chat = () => {
     }
     try {
       // Inside handleRename -> separate try block added for backend request
-      const response = await fetch(`http://localhost:5000/api/chat/sessions/${id}`, {
+      const response = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/sessions/${id}`, {
         method: 'PUT',
         headers: { 
           'Content-Type': 'application/json',
@@ -149,7 +149,7 @@ const Chat = () => {
     if (!confirmDelete) return;
 
     try {
-      const response = await fetch(`http://localhost:5000/api/chat/sessions/${id}`, {
+      const response = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/sessions/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
@@ -278,7 +278,7 @@ const handleVoiceInput = () => {
     setMessages((prev) => [...prev, { text: '', sender: 'ai' }]); // Inserted an empty AI bubble
 
     try {
-      const response = await fetch('http://localhost:5000/api/chat/generate', {
+      const response = await fetch('https://nexusai-backend-966g.onrender.com/api/chat/generate', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',

@@ -16,7 +16,7 @@ const Login = () => {
     setLoading(true);
 
     try {
-      const response = await axios.post('http://localhost:5000/api/auth/login', formData);
+      const response = await axios.post('https://nexusai-backend-966g.onrender.com/api/auth/login', formData);
       toast.success(response.data.message);
       
       // Save user data and authentication token in the Zustand store
