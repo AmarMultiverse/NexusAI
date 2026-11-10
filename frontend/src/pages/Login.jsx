@@ -2,27 +2,25 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import toast from 'react-hot-toast';
-import { Mail, Lock, Loader2 } from 'lucide-react';
-import { useAuthStore } from '../store/useAuthStore'; // Our custom central state store
+import { Mail, Lock, Loader2, ArrowRight } from 'lucide-react';
+import { useAuthStore } from '../store/useAuthStore';
+
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'https://nexusai-backend-966g.onrender.com';
 
 const Login = () => {
   const [formData, setFormData] = useState({ email: '', password: '' });
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const loginSuccess = useAuthStore((state) => state.loginSuccess); // Extract the login function from the store
+  const loginSuccess = useAuthStore((state) => state.loginSuccess);
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      const response = await axios.post('https://nexusai-backend-966g.onrender.com/api/auth/login', formData);
+      const response = await axios.post(`${API_BASE_URL}/api/auth/login`, formData);
       toast.success(response.data.message);
-      
-      // Save user data and authentication token in the Zustand store
       loginSuccess(response.data.user, response.data.token);
-      
-      // Redirect to the main chat interface after a successful login
       navigate('/'); 
     } catch (error) {
       toast.error(error.response?.data?.message || "Login failed!");
@@ -36,7 +34,7 @@ const Login = () => {
       <div className="max-w-md w-full bg-gray-900 border border-gray-800 p-8 rounded-2xl shadow-xl">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-white mb-2">Welcome Back</h1>
-          <p className="text-gray-400">Sign in to continue to NexusAI</p>
+          <p className="text-gray-400">Sign in to save and sync your NexusAI chats</p>
         </div>
 
         <form onSubmit={handleLogin} className="space-y-5">
@@ -73,7 +71,17 @@ const Login = () => {
           </button>
         </form>
 
-        <p className="text-gray-400 text-center mt-6">
+        <div className="mt-4 pt-4 border-t border-gray-800">
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="w-full bg-gray-800 hover:bg-gray-700 text-gray-200 font-medium py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors text-sm"
+          >
+            Continue as Guest (No Login Required) <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        <p className="text-gray-400 text-center mt-6 text-sm">
           Don't have an account?{' '}
           <Link to="/register" className="text-blue-500 hover:text-blue-400 font-medium">
             Sign up

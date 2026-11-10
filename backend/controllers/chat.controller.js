@@ -1,13 +1,10 @@
 import Groq from "groq-sdk";
 import Message from '../models/message.model.js';
-import ChatSession from '../models/session.model.js'; // Imported new Session Model
-
-
+import ChatSession from '../models/session.model.js';
 
 // 1. Fetch all sessions for the sidebar
 export const getAllSessions = async (req, res) => {
     try {
-        // Find all sessions for the user and sort them by the most recently updated (descending order)
         const sessions = await ChatSession.find({ userId: req.user._id }).sort({ updatedAt: -1 });
         res.status(200).json(sessions);
     } catch (error) {
@@ -19,7 +16,7 @@ export const getAllSessions = async (req, res) => {
 // 2. Fetch previous chat messages for a specific session
 export const getMessages = async (req, res) => {
     try {
-        const { sessionId } = req.params; // Retrieve the specific session ID from the URL parameters
+        const { sessionId } = req.params;
         const messages = await Message.find({ senderId: req.user._id, sessionId });
         res.status(200).json(messages);
     } catch (error) {
@@ -28,94 +25,142 @@ export const getMessages = async (req, res) => {
     }
 };
 
-// 3. Generate and save a new chat response
+// 3. Generate chat response (Supports Automatic Model Fallback + Guest & Auth Modes)
 export const generateChatResponse = async (req, res) => {
     try {
-        const { prompt, sessionId, aiModel } = req.body; 
-        const userId = req.user._id;
+        const { prompt, sessionId, aiModel, guestHistory } = req.body; 
+        const userId = req.user?._id || null;
 
-        if (!prompt) return res.status(400).json({ message: "Prompt cannot be empty!" });
-
-        let currentSessionId = sessionId;
-
-        // 1. If it's a new chat, create a new session
-        if (!currentSessionId) {
-            const newSession = await ChatSession.create({
-                userId,
-                title: prompt.substring(0, 30) + (prompt.length > 30 ? '...' : '') 
-            });
-            currentSessionId = newSession._id;
+        if (!prompt) {
+            return res.status(400).json({ message: "Prompt cannot be empty!" });
         }
 
-        // 2. Save the user's new message to the database
-        await Message.create({
-            senderId: userId,
-            sessionId: currentSessionId,
-            text: prompt,
-            role: "user"
-        });
+        let currentSessionId = sessionId;
+        let formattedMessages = [];
 
-        // 🧠 3. NEW LOGIC: Fetch AI Memory (Chat History)
-        // Retrieve all previous messages for this session from the database to provide context to the AI
-        const chatHistory = await Message.find({ sessionId: currentSessionId }).sort({ createdAt: 1 });
-        
-        // Format previous messages into 'user' and 'assistant' roles as required by the Groq API
-        const formattedMessages = chatHistory.map(msg => ({
-            role: msg.role === 'ai' ? 'assistant' : 'user', 
-            content: msg.text
-        }));
+        // CASE A: Authenticated User -> Save & load context from MongoDB
+        if (userId) {
+            if (!currentSessionId) {
+                const newSession = await ChatSession.create({
+                    userId,
+                    title: prompt.substring(0, 30) + (prompt.length > 30 ? '...' : '') 
+                });
+                currentSessionId = newSession._id;
+            }
 
-        // 4. Set a smart and direct system prompt
+            await Message.create({
+                senderId: userId,
+                sessionId: currentSessionId,
+                text: prompt,
+                role: "user"
+            });
+
+            const chatHistory = await Message.find({ sessionId: currentSessionId }).sort({ createdAt: 1 });
+            formattedMessages = chatHistory.map(msg => ({
+                role: msg.role === 'ai' ? 'assistant' : 'user', 
+                content: msg.text
+            }));
+        } 
+        // CASE B: Guest User (Recruiter Mode) -> Use temporary client-side history
+        else {
+            if (Array.isArray(guestHistory) && guestHistory.length > 0) {
+                formattedMessages = guestHistory
+                    .filter(msg => msg.text && msg.text.trim() !== '')
+                    .map(msg => ({
+                        role: msg.sender === 'ai' ? 'assistant' : 'user',
+                        content: msg.text
+                    }));
+            }
+            formattedMessages.push({ role: 'user', content: prompt });
+        }
+
+        // System prompt for NexusAI persona
         const systemPrompt = {
             role: "system",
             content: "You are NexusAI, an expert AI software engineer created by Amar. Provide direct, accurate code and answers without unnecessary greetings. Always prioritize fulfilling the user's specific request."
         };
 
-        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        // Set SSE Streaming Headers
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache');
         res.setHeader('Connection', 'keep-alive');
         
-        res.write(`data: ${JSON.stringify({ sessionId: currentSessionId })}\n\n`);
+        if (userId && currentSessionId) {
+            res.write(`data: ${JSON.stringify({ sessionId: currentSessionId })}\n\n`);
+        }
 
-        // 5. Send both memory and the new message to the API
-        const stream = await groq.chat.completions.create({
-            messages: [
-                systemPrompt,
-                ...formattedMessages // Send the entire history using the spread operator
-            ],
-            model: aiModel || "llama-3.3-70b-versatile",
-            stream: true,
-        });
+        // Build Resilient Model Fallback Queue from .env and active Groq Production Models
+        const primaryEnvModel = process.env.PRIMARY_AI_MODEL || "openai/gpt-oss-120b";
+        const fallbackEnvModels = process.env.FALLBACK_AI_MODELS
+            ? process.env.FALLBACK_AI_MODELS.split(',').map(m => m.trim())
+            : ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"];
+
+        // Unique ordered list: User Selected Model -> Primary .env Model -> Fallback .env Models
+        const modelQueue = [...new Set([
+            aiModel,
+            primaryEnvModel,
+            ...fallbackEnvModels,
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b"
+        ].filter(Boolean))];
+
+        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        let stream = null;
+        let activeModelUsed = null;
+        let lastError = null;
+
+        // Try models in sequence until one succeeds
+        for (const candidateModel of modelQueue) {
+            try {
+                stream = await groq.chat.completions.create({
+                    messages: [systemPrompt, ...formattedMessages],
+                    model: candidateModel,
+                    stream: true,
+                });
+                activeModelUsed = candidateModel;
+                break; // Successfully connected to a model!
+            } catch (err) {
+                console.warn(`Model [${candidateModel}] failed (${err.message}). Trying next fallback model...`);
+                lastError = err;
+            }
+        }
+
+        if (!stream) {
+            throw new Error(lastError?.message || "All configured AI models failed to respond.");
+        }
 
         let aiFullResponse = "";
         for await (const chunk of stream) {
             const chunkText = chunk.choices[0]?.delta?.content || "";
             if (chunkText) {
                 aiFullResponse += chunkText;
-                res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+                res.write(`data: ${JSON.stringify({ text: chunkText, modelUsed: activeModelUsed })}\n\n`);
             }
         }
 
-        // 6. Save the AI's final message
-        await Message.create({
-            senderId: userId,
-            sessionId: currentSessionId,
-            text: aiFullResponse,
-            role: "ai"
-        });
+        // Save AI response to MongoDB only if user is logged in
+        if (userId && currentSessionId && aiFullResponse.trim() !== "") {
+            await Message.create({
+                senderId: userId,
+                sessionId: currentSessionId,
+                text: aiFullResponse,
+                role: "ai"
+            });
+        }
 
         res.write('data: [DONE]\n\n');
         res.end();
 
     } catch (error) {
         console.error("Chat Error:", error.message);
-        res.write(`data: ${JSON.stringify({ error: "Something went wrong with the AI processing." })}\n\n`);
+        res.write(`data: ${JSON.stringify({ error: `AI Service Error: ${error.message}` })}\n\n`);
+        res.write('data: [DONE]\n\n');
         res.end();
     }
 };
 
-// --- NEW FUNCTION: Rename Chat Session ---
+// 4. Rename Chat Session
 export const renameSession = async (req, res) => {
     try {
         const { title } = req.body;
@@ -124,11 +169,10 @@ export const renameSession = async (req, res) => {
             return res.status(400).json({ message: "Title cannot be empty!" });
         }
 
-        // Find in the database and update
         const updatedSession = await ChatSession.findOneAndUpdate(
             { _id: req.params.id, userId: req.user._id }, 
             { title: title },
-            { new: true } // Return the newly updated document
+            { new: true }
         );
 
         if (!updatedSession) {
@@ -142,16 +186,13 @@ export const renameSession = async (req, res) => {
     }
 };
 
-// --- NEW FUNCTION: Delete Chat Session ---
+// 5. Delete Chat Session
 export const deleteSession = async (req, res) => {
     try {
         const sessionId = req.params.id;
         const userId = req.user._id;
 
-        // 1. Cascading Delete: First, delete all messages associated with this session
         await Message.deleteMany({ sessionId: sessionId, senderId: userId });
-
-        // 2. Then, delete the session itself from the database
         const deletedSession = await ChatSession.findOneAndDelete({ _id: sessionId, userId: userId });
 
         if (!deletedSession) {

@@ -1,22 +1,22 @@
 import express from 'express';
 import { generateChatResponse, getMessages, getAllSessions, renameSession, deleteSession } from '../controllers/chat.controller.js';
-import { protectRoute } from '../middleware/auth.middleware.js';
+import { protectRoute, optionalAuth } from '../middleware/auth.middleware.js';
 
 const router = express.Router();
 
-// Fetch all session titles
+// Fetch all session titles (Requires Login)
 router.get('/sessions', protectRoute, getAllSessions);
 
-// Pass the sessionId in the URL to fetch chat history
+// Pass the sessionId in the URL to fetch chat history (Requires Login)
 router.get('/history/:sessionId', protectRoute, getMessages);
 
-// Generate a new chat response
-router.post('/generate', protectRoute, generateChatResponse);
+// Generate a new chat response (Supports both Guest Mode and Logged-in Mode)
+router.post('/generate', optionalAuth, generateChatResponse);
 
-// NEW ROUTE: Update (rename) a session's title
+// Update (rename) a session's title (Requires Login)
 router.put('/sessions/:id', protectRoute, renameSession);
 
-// NEW ROUTE: Delete a session
+// Delete a session (Requires Login)
 router.delete('/sessions/:id', protectRoute, deleteSession);
 
 export default router;

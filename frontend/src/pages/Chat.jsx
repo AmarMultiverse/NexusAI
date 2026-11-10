@@ -1,59 +1,58 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Send, Bot, User, LogOut, Loader2, Plus, MessageSquare, Edit2, Check, X, Trash2, Download, Copy, Mic, MicOff } from 'lucide-react';
+import { Send, Bot, User, LogOut, LogIn, Loader2, Plus, MessageSquare, Edit2, Check, X, Trash2, Download, Copy, Mic, MicOff } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism'; // This provides a VS Code-like dark theme
-import toast from 'react-hot-toast'; // Imported toast for popups
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import toast from 'react-hot-toast';
+
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'https://nexusai-backend-966g.onrender.com';
 
 const Chat = () => {
-  // --- 1. ALL STATES (Variables) ---
-  const [messages, setMessages] = useState([]); // For chat screen messages
-  const [input, setInput] = useState(''); // For text field input
-  const [isTyping, setIsTyping] = useState(false); // AI loading spinner tracker
-  const [sessions, setSessions] = useState([]); // List of all chat rooms (sessions) in the sidebar
-  const [copiedIndex, setCopiedIndex] = useState(null); // Tracks which message was copied
-  const [isListening, setIsListening] = useState(false); // Tracks if the mic is on or off
+  // --- 1. ALL STATES ---
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [sessions, setSessions] = useState([]);
+  const [copiedIndex, setCopiedIndex] = useState(null);
+  const [isListening, setIsListening] = useState(false);
   
-  // Checking localStorage to remember the current chat room on refresh
   const [currentSessionId, setCurrentSessionId] = useState(localStorage.getItem('currentSessionId') || null);
   
-  const [selectedModel, setSelectedModel] = useState("llama-3.1-8b-instant"); // Selected AI Model
-  const [editingSessionId, setEditingSessionId] = useState(null); // ID of the session being renamed
-  const [editTitle, setEditTitle] = useState(""); // The text being typed in the input during rename
+  // Defaulting to Groq's flagship active model from GroqDocs
+  const [selectedModel, setSelectedModel] = useState("openai/gpt-oss-120b");
+  const [editingSessionId, setEditingSessionId] = useState(null);
+  const [editTitle, setEditTitle] = useState("");
 
   // --- 2. REFS & CENTRAL STORE ---
   const { user, logout, token } = useAuthStore();
   const navigate = useNavigate();
-  const messagesEndRef = useRef(null); // Bottom of the screen for auto-scroll
-  const isStreaming = useRef(false); // Stream tracker to prevent race conditions
-  const recognitionRef = useRef(null); // To remember the active mic instance
+  const messagesEndRef = useRef(null);
+  const isStreaming = useRef(false);
+  const recognitionRef = useRef(null);
 
-  // --- 3. USE EFFECTS (Automations) ---
+  // --- 3. USE EFFECTS ---
 
-  // Auto Scroll: Screen scrolls down when a new message arrives
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
   useEffect(() => { scrollToBottom(); }, [messages]);
 
-  // Security Check: Redirect to Login page if token/user is missing
-  useEffect(() => { if (!user) navigate('/login'); }, [user, navigate]);
-
-  // Refresh Fix: Save/delete currentSessionId in persistent storage whenever it changes
+  // Save/delete currentSessionId in persistent storage for logged-in users
   useEffect(() => {
-    if (currentSessionId) {
+    if (user && currentSessionId) {
       localStorage.setItem('currentSessionId', currentSessionId);
     } else {
       localStorage.removeItem('currentSessionId');
     }
-  }, [currentSessionId]);
+  }, [currentSessionId, user]);
 
-  // Sidebar Load: Fetch all sessions (titles) from the backend on page load
+  // Fetch all sessions for the sidebar (Only when logged in)
   const fetchSessions = async () => {
+    if (!user || !token) return;
     try {
-      const res = await fetch('https://nexusai-backend-966g.onrender.com/api/chat/sessions', {
+      const res = await fetch(`${API_BASE_URL}/api/chat/sessions`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -64,21 +63,27 @@ const Chat = () => {
       console.error("Sessions fetch error:", error);
     }
   };
+
   useEffect(() => {
-    if (user && token) fetchSessions();
+    if (user && token) {
+      fetchSessions();
+    } else {
+      setSessions([]);
+      setCurrentSessionId(null);
+    }
   }, [user, token]);
 
-  // History Load: Fetch previous chat from the database when the user selects a different room from the sidebar
+  // Fetch previous chat messages when selecting a session from the sidebar
   useEffect(() => {
     const fetchChatHistory = async () => {
-      if (isStreaming.current) return; // Do not fetch if the AI is currently typing
+      if (isStreaming.current) return;
 
-      if (!currentSessionId) {
-        setMessages([]); // Clear the screen if it's a new chat
+      if (!user || !token || !currentSessionId) {
+        if (!currentSessionId) setMessages([]);
         return;
       }
       try {
-        const res = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/history/${currentSessionId}`, {
+        const res = await fetch(`${API_BASE_URL}/api/chat/history/${currentSessionId}`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (res.ok) {
@@ -94,15 +99,17 @@ const Chat = () => {
       }
     };
     fetchChatHistory();
-  }, [currentSessionId, token]);
+  }, [currentSessionId, token, user]);
 
-
-  // --- 4. INDEPENDENT HANDLER FUNCTIONS ---
+  // --- 4. HANDLER FUNCTIONS ---
 
   const handleLogout = () => {
     logout();
     localStorage.removeItem('currentSessionId');
-    navigate('/login');
+    setSessions([]);
+    setCurrentSessionId(null);
+    setMessages([]);
+    toast.success("Logged out! You are now in Guest Mode.");
   };
 
   const handleNewChat = () => {
@@ -110,15 +117,13 @@ const Chat = () => {
     setMessages([]);
   };
 
-  // REWRITE & FIX: handleRename function is defined separately here (not nested)
   const handleRename = async (id) => {
     if (!editTitle.trim()) {
       setEditingSessionId(null);
       return;
     }
     try {
-      // Inside handleRename -> separate try block added for backend request
-      const response = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/sessions/${id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${id}`, {
         method: 'PUT',
         headers: { 
           'Content-Type': 'application/json',
@@ -129,7 +134,7 @@ const Chat = () => {
 
       if (response.ok) {
         setEditingSessionId(null);
-        fetchSessions(); // Refresh sidebar so the new name appears immediately
+        fetchSessions();
         toast.success("Chat renamed successfully!"); 
       } else {
         const data = await response.json();
@@ -141,28 +146,25 @@ const Chat = () => {
     }
   };
 
-  // FOR DELETING CHATS 
   const handleDelete = async (id, e) => {
-    e.stopPropagation(); // Prevents row click to avoid opening another chat
+    e.stopPropagation();
     
     const confirmDelete = window.confirm("Are you sure you want to delete this chat?");
     if (!confirmDelete) return;
 
     try {
-      const response = await fetch(`https://nexusai-backend-966g.onrender.com/api/chat/sessions/${id}`, {
+      const response = await fetch(`${API_BASE_URL}/api/chat/sessions/${id}`, {
         method: 'DELETE',
         headers: { 'Authorization': `Bearer ${token}` }
       });
 
       if (response.ok) {
         toast.success("Chat deleted successfully!");
-        
-        // If the deleted chat is currently open, clear the screen
         if (currentSessionId === id) {
           setCurrentSessionId(null);
           setMessages([]);
         }
-        fetchSessions(); // Refresh sidebar
+        fetchSessions();
       } else {
         toast.error("Delete failed.");
       }
@@ -172,47 +174,40 @@ const Chat = () => {
     }
   };
 
-  // FOR DOWNLOADING CHATS
   const handleExportChat = () => {
     if (messages.length === 0) {
       toast.error("Cannot export an empty chat!");
       return;
     }
 
-    // 1. Convert messages to a clean text/markdown format
     let chatText = `# NexusAI Chat Export\n\n`;
     messages.forEach((msg) => {
       const role = msg.sender === 'user' ? 'You' : 'NexusAI';
       chatText += `### ${role}:\n${msg.text}\n\n---\n\n`;
     });
 
-    // 2. Use a Blob to convert the text into an .md file
     const blob = new Blob([chatText], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     
-    // 3. Create a temporary link to trigger the file download
     const a = document.createElement('a');
     a.href = url;
     a.download = 'NexusAI-Export.md';
     document.body.appendChild(a);
     a.click();
     
-    // 4. Clean up memory
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     toast.success("Chat downloaded successfully!");
   };
 
-  // FOR COPYING CHATS
   const handleCopy = (text, index) => {
-    navigator.clipboard.writeText(text); // Copies text to the clipboard
-    setCopiedIndex(index); // To show the green tick
-    setTimeout(() => setCopiedIndex(null), 2000); // The copy icon will return after 2 seconds
+    navigator.clipboard.writeText(text);
+    setCopiedIndex(index);
+    setTimeout(() => setCopiedIndex(null), 2000);
     toast.success("Copied to clipboard!");
   };
 
-  // VOICE TO TEXT conversion using MIC
-const handleVoiceInput = () => {
+  const handleVoiceInput = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     
     if (!SpeechRecognition) {
@@ -220,16 +215,15 @@ const handleVoiceInput = () => {
       return;
     }
 
-    // 🔥 CHANGE 1: If the mic is already running, STOP it and exit
     if (isListening) {
       if (recognitionRef.current) {
-        recognitionRef.current.stop(); // This will stop the active mic
+        recognitionRef.current.stop();
       }
       return;
     }
 
     const recognition = new SpeechRecognition();
-    recognitionRef.current = recognition; // Saved mic control in Ref
+    recognitionRef.current = recognition;
     
     recognition.lang = 'en-IN';
     recognition.interimResults = false; 
@@ -244,17 +238,13 @@ const handleVoiceInput = () => {
       setInput((prev) => prev + (prev ? " " : "") + transcript);
     };
 
-    // 🔥 CHANGE 2: Filtered errors to avoid displaying incorrect messages
     recognition.onerror = (event) => {
       console.error("Speech Error:", event.error);
-      
-      // 'aborted' occurs when the mic is manually stopped, do not treat it as an error
       if (event.error === 'not-allowed') {
         toast.error("Microphone permission denied!");
       } else if (event.error !== 'aborted') {
         toast.error("Something went wrong with the microphone!");
       }
-      
       setIsListening(false);
     };
 
@@ -269,23 +259,36 @@ const handleVoiceInput = () => {
     e.preventDefault();
     if (!input.trim()) return;
 
-    isStreaming.current = true; // Applied stream lock
+    isStreaming.current = true;
 
+    const previousMessagesSnapshot = [...messages];
     const userMessage = { text: input, sender: 'user' };
+    
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setIsTyping(true);
-    setMessages((prev) => [...prev, { text: '', sender: 'ai' }]); // Inserted an empty AI bubble
+    setMessages((prev) => [...prev, { text: '', sender: 'ai' }]);
 
     try {
-      const response = await fetch('https://nexusai-backend-966g.onrender.com/api/chat/generate', {
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/chat/generate`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}` 
-        },
-        body: JSON.stringify({ prompt: userMessage.text, sessionId: currentSessionId, aiModel: selectedModel })
+        headers,
+        body: JSON.stringify({
+          prompt: userMessage.text,
+          sessionId: user ? currentSessionId : null,
+          aiModel: selectedModel,
+          guestHistory: !user ? previousMessagesSnapshot : undefined
+        })
       });
+
+      if (!response.ok || !response.body) {
+        throw new Error(`Server responded with status ${response.status}`);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
@@ -299,25 +302,33 @@ const handleVoiceInput = () => {
         
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '');
+            const dataStr = line.replace('data: ', '').trim();
             if (dataStr === '[DONE]') break;
             
             try {
               const data = JSON.parse(dataStr);
               
-              // Check the first ID of the new session
-              if (data.sessionId && !currentSessionId) {
+              if (data.sessionId && !currentSessionId && user) {
                 setCurrentSessionId(data.sessionId);
                 fetchSessions();
-              } 
-              // Immutability Fix: Creating a new object to prevent stuttering
-              else if (data.text) {
+              } else if (data.text) {
                 setMessages((prev) => {
                   const newMessages = [...prev];
                   const lastIndex = newMessages.length - 1;
                   newMessages[lastIndex] = {
                     ...newMessages[lastIndex],
                     text: newMessages[lastIndex].text + data.text
+                  };
+                  return newMessages;
+                });
+              } else if (data.error) {
+                toast.error(data.error);
+                setMessages((prev) => {
+                  const newMessages = [...prev];
+                  const lastIndex = newMessages.length - 1;
+                  newMessages[lastIndex] = {
+                    ...newMessages[lastIndex],
+                    text: `⚠️ ${data.error}`
                   };
                   return newMessages;
                 });
@@ -330,9 +341,21 @@ const handleVoiceInput = () => {
       }
     } catch (error) {
       console.error('Chat generation error:', error);
+      toast.error("Failed to get response from server.");
+      setMessages((prev) => {
+        const newMessages = [...prev];
+        const lastIndex = newMessages.length - 1;
+        if (newMessages[lastIndex]?.sender === 'ai' && newMessages[lastIndex]?.text === '') {
+          newMessages[lastIndex] = {
+            ...newMessages[lastIndex],
+            text: "⚠️ Unable to reach the AI server. If the backend was idle, please wait 15 seconds and try again."
+          };
+        }
+        return newMessages;
+      });
     } finally {
       setIsTyping(false);
-      isStreaming.current = false; // Released stream lock
+      isStreaming.current = false;
     }
   };
 
@@ -357,39 +380,44 @@ const handleVoiceInput = () => {
         {/* Dynamic Sessions Title List */}
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           <p className="text-xs text-gray-500 font-semibold px-2 mb-2 uppercase">Recent Chats</p>
-          {sessions.map((session) => (
-            <div 
-              key={session._id} 
-              className={`group flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
-                currentSessionId === session._id ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
-              }`}
-            >
-              {/* Check Condition: Are we renaming this specific row? */}
-              {editingSessionId === session._id ? (
-                <div className="flex items-center gap-2 w-full">
-                  <input 
-                    type="text" 
-                    value={editTitle}
-                    onChange={(e) => setEditTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleRename(session._id); // Enter key support added
-                    }}
-                    className="flex-1 bg-gray-900 text-white px-2 py-1 rounded text-sm outline-none border border-gray-700"
-                    autoFocus
-                  />
-                  <button onClick={() => handleRename(session._id)} className="text-green-500 hover:text-green-400"><Check className="w-4 h-4" /></button>
-                  <button onClick={() => setEditingSessionId(null)} className="text-red-500 hover:text-red-400"><X className="w-4 h-4" /></button>
-                </div>
-              ) : (
-                <>
-                  <button onClick={() => setCurrentSessionId(session._id)} className="flex-1 text-left flex items-center gap-3 truncate">
-                    <MessageSquare className="w-4 h-4 shrink-0" />
-                    <span className="truncate text-sm">{session.title}</span>
-                  </button>
-                  
-                  {/* Action Buttons: Visible on hover */}
-                  <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
-                      {/* Rename Button */}
+          {!user ? (
+            <div className="px-3 py-4 text-xs text-gray-400 bg-gray-800/40 rounded-lg border border-gray-800 space-y-2">
+              <p className="font-medium text-gray-300">Guest Session Active</p>
+              <p>You can chat freely! Sign in anytime to save your conversation history across devices.</p>
+            </div>
+          ) : sessions.length === 0 ? (
+            <p className="text-xs text-gray-500 px-2">No saved chats yet.</p>
+          ) : (
+            sessions.map((session) => (
+              <div 
+                key={session._id} 
+                className={`group flex items-center justify-between px-3 py-2 rounded-lg transition-colors ${
+                  currentSessionId === session._id ? 'bg-gray-800 text-white' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                }`}
+              >
+                {editingSessionId === session._id ? (
+                  <div className="flex items-center gap-2 w-full">
+                    <input 
+                      type="text" 
+                      value={editTitle}
+                      onChange={(e) => setEditTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRename(session._id);
+                      }}
+                      className="flex-1 bg-gray-900 text-white px-2 py-1 rounded text-sm outline-none border border-gray-700"
+                      autoFocus
+                    />
+                    <button onClick={() => handleRename(session._id)} className="text-green-500 hover:text-green-400"><Check className="w-4 h-4" /></button>
+                    <button onClick={() => setEditingSessionId(null)} className="text-red-500 hover:text-red-400"><X className="w-4 h-4" /></button>
+                  </div>
+                ) : (
+                  <>
+                    <button onClick={() => setCurrentSessionId(session._id)} className="flex-1 text-left flex items-center gap-3 truncate">
+                      <MessageSquare className="w-4 h-4 shrink-0" />
+                      <span className="truncate text-sm">{session.title}</span>
+                    </button>
+                    
+                    <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
                       <button 
                         onClick={(e) => { e.stopPropagation(); setEditingSessionId(session._id); setEditTitle(session.title); }} 
                         className="p-1 hover:bg-gray-700 rounded text-gray-400 hover:text-white transition-colors"
@@ -398,7 +426,6 @@ const handleVoiceInput = () => {
                         <Edit2 className="w-3 h-3" />
                       </button>
                       
-                      {/* Delete Button */}
                       <button 
                         onClick={(e) => handleDelete(session._id, e)} 
                         className="p-1 hover:bg-red-900/50 rounded text-gray-400 hover:text-red-500 transition-colors"
@@ -406,30 +433,53 @@ const handleVoiceInput = () => {
                       >
                         <Trash2 className="w-3 h-3" />
                       </button>
-                  </div>
-                </>
-              )}
-            </div>
-          ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            ))
+          )}
         </div>
 
-        {/* Profile Info Row & Logout */}
-        <div className="p-4 border-t border-gray-800 space-y-4">
-          <div className="flex items-center gap-3 bg-gray-800 p-3 rounded-lg">
-            <div className="bg-blue-600 p-2 rounded-full shrink-0">
-              <User className="w-5 h-5 text-white" />
+        {/* Profile Info Row & Login / Logout */}
+        <div className="p-4 border-t border-gray-800 space-y-3">
+          {user ? (
+            <>
+              <div className="flex items-center gap-3 bg-gray-800 p-3 rounded-lg">
+                <div className="bg-blue-600 p-2 rounded-full shrink-0">
+                  <User className="w-5 h-5 text-white" />
+                </div>
+                <div className="overflow-hidden">
+                  <p className="font-medium text-sm truncate">{user?.name}</p>
+                  <p className="text-xs text-gray-400 truncate">{user?.email}</p>
+                </div>
+              </div>
+              <button 
+                onClick={handleLogout}
+                className="flex items-center justify-center gap-2 text-gray-400 hover:text-red-400 w-full p-2 transition-colors text-sm font-medium"
+              >
+                <LogOut className="w-4 h-4" /> Logout
+              </button>
+            </>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-3 bg-gray-800/60 p-3 rounded-lg">
+                <div className="bg-gray-700 p-2 rounded-full shrink-0">
+                  <User className="w-5 h-5 text-gray-300" />
+                </div>
+                <div className="overflow-hidden">
+                  <p className="font-medium text-sm text-gray-200 truncate">Guest Mode</p>
+                  <p className="text-xs text-gray-400 truncate">Temporary Session</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => navigate('/login')}
+                className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white w-full py-2 px-4 rounded-lg transition-colors text-sm font-medium"
+              >
+                <LogIn className="w-4 h-4" /> Sign In to Save Chats
+              </button>
             </div>
-            <div className="overflow-hidden">
-              <p className="font-medium text-sm truncate">{user?.name}</p>
-              <p className="text-xs text-gray-400 truncate">{user?.email}</p>
-            </div>
-          </div>
-          <button 
-            onClick={handleLogout}
-            className="flex items-center justify-center gap-2 text-gray-400 hover:text-red-400 w-full p-2 transition-colors text-sm font-medium"
-          >
-            <LogOut className="w-4 h-4" /> Logout
-          </button>
+          )}
         </div>
       </div>
 
@@ -440,9 +490,19 @@ const handleVoiceInput = () => {
           <h1 className="text-xl font-bold text-blue-500 flex items-center gap-2">
             <Bot className="w-6 h-6" /> NexusAI
           </h1>
-          <button onClick={handleNewChat} className="text-gray-400 p-2">
-            <Plus className="w-6 h-6" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={handleNewChat} className="text-gray-400 p-2" title="New Chat">
+              <Plus className="w-5 h-5" />
+            </button>
+            {!user && (
+              <button
+                onClick={() => navigate('/login')}
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-md font-medium"
+              >
+                Sign In
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Messages Screen Container */}
@@ -450,8 +510,12 @@ const handleVoiceInput = () => {
           {messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-4">
               <Bot className="w-16 h-16 opacity-50" />
-              <h2 className="text-2xl font-semibold">How can I help you today?</h2>
-              <p className="text-sm">Start a new conversation or pick from history!</p>
+              <h2 className="text-2xl font-semibold text-gray-300">How can I help you today?</h2>
+              <p className="text-sm text-center max-w-md">
+                {user 
+                  ? "Start a new conversation or pick from your saved history!" 
+                  : "You are chatting in instant Guest Mode. Ask anything or sign in to save your chats!"}
+              </p>
             </div>
           ) : (
             messages.map((msg, index) => (
@@ -461,10 +525,8 @@ const handleVoiceInput = () => {
                     <Bot className="w-5 h-5 text-white" />
                   </div>
                 )}
-                {/* NEW: Added 'relative' and 'group' here */}
                 <div className={`relative group p-4 rounded-2xl max-w-[80%] ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-gray-800 text-gray-200 rounded-tl-none'}`}>
                   
-                  {/* NEW: Copy Button will only appear on AI messages */}
                   {msg.sender === 'ai' && !isTyping && msg.text !== '' && (
                     <button
                       onClick={() => handleCopy(msg.text, index)}
@@ -480,27 +542,27 @@ const handleVoiceInput = () => {
                   ) : (
                     <div className="prose prose-invert max-w-none text-gray-100 text-sm md:text-base leading-relaxed">
                       <ReactMarkdown
-                          components={{
-                            code({ node, inline, className, children, ...props }) {
-                              const match = /language-(\w+)/.exec(className || '');
-                              return !inline && match ? (
-                                <SyntaxHighlighter
-                                  style={vscDarkPlus}
-                                  language={match[1]}
-                                  PreTag="div"
-                                  className="rounded-md my-2 text-sm"
-                                  {...props}
-                                >
-                                  {String(children).replace(/\n$/, '')}
-                                </SyntaxHighlighter>
-                              ) : (
-                                <code className="bg-gray-800 text-blue-400 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
-                                  {children}
-                                </code>
-                              );
-                            }
-                          }}
-                        >
+                        components={{
+                          code({ node, inline, className, children, ...props }) {
+                            const match = /language-(\w+)/.exec(className || '');
+                            return !inline && match ? (
+                              <SyntaxHighlighter
+                                style={vscDarkPlus}
+                                language={match[1]}
+                                PreTag="div"
+                                className="rounded-md my-2 text-sm"
+                                {...props}
+                              >
+                                {String(children).replace(/\n$/, '')}
+                              </SyntaxHighlighter>
+                            ) : (
+                              <code className="bg-gray-800 text-blue-400 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+                                {children}
+                              </code>
+                            );
+                          }
+                        }}
+                      >
                         {msg.text}
                       </ReactMarkdown>
                     </div>
@@ -521,24 +583,19 @@ const handleVoiceInput = () => {
         <div className="p-4 bg-gray-900 border-t border-gray-800">
           
           {/* Dynamic AI Brain Model Selector Placement */}
-          <div className="max-w-4xl mx-auto mb-3 flex gap-2">
+          <div className="max-w-4xl mx-auto mb-3 flex items-center justify-between gap-2">
             <select 
               value={selectedModel} 
               onChange={(e) => setSelectedModel(e.target.value)}
-              className="bg-gray-800 text-xs text-gray-400 border border-gray-700 rounded-md px-3 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer"
+              className="bg-gray-800 text-xs text-gray-300 border border-gray-700 rounded-md px-3 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer"
               disabled={isTyping}
             >
-              {/* Llama 3.1 - Fastest and Most Stable */}
-              <option value="llama-3.1-8b-instant">NexusAI 3.1 Pro (Fastest)</option>
-              
-              {/* NEW: Replaced Gemma with GPT-OSS 20B (Very powerful) */}
-              <option value="openai/gpt-oss-20b">NexusAI GPT OSS (Advanced Chat)</option>
-              
-              {/* NEW: Replaced Mixtral with Llama 3.3 70B (For Heavy Logic) */}
-              <option value="llama-3.3-70b-versatile">NexusAI 3.3 (Complex Logic)</option>
+              {/* Updated Active Production Models from GroqDocs */}
+              <option value="openai/gpt-oss-120b">NexusAI GPT-OSS 120B (Flagship Reasoning)</option>
+              <option value="openai/gpt-oss-20b">NexusAI GPT-OSS 20B (Ultra-Fast 1000 T/s)</option>
+              <option value="qwen/qwen3.8-27b">NexusAI Qwen 3.8 27B (Coding & Logic)</option>
             </select>
 
-            {/* NEW: Download Chat Button */}
             <button
               onClick={handleExportChat}
               disabled={messages.length === 0 || isTyping}
@@ -560,7 +617,6 @@ const handleVoiceInput = () => {
               disabled={isTyping}
             />
             
-            {/* NEW: Mic Button */}
             <button
               type="button"
               onClick={handleVoiceInput}
@@ -573,7 +629,6 @@ const handleVoiceInput = () => {
               {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
             </button>
 
-            {/* Send Button */}
             <button
               type="submit"
               disabled={isTyping || !input.trim()}

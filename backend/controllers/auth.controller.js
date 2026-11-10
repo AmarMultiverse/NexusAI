@@ -1,39 +1,82 @@
 import User from '../models/user.model.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import dns from 'dns';
+
+// Helper function to validate email format, block dummy addresses, and verify domain MX records
+const verifyRealEmail = async (email) => {
+    const cleanEmail = email.trim().toLowerCase();
+    
+    // 1. Strict RFC-compliant Email Regex
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(cleanEmail)) {
+        return { valid: false, reason: "Invalid email format. Please enter a valid email address." };
+    }
+
+    const [localPart, domain] = cleanEmail.split('@');
+
+    // 2. Block common disposable/fake domains and obvious placeholder usernames
+    const blockedDomains = ['mailinator.com', 'tempmail.com', '10minutemail.com', 'guerrillamail.com', 'yopmail.com', 'example.com', 'test.com', 'fake.com'];
+    const blockedLocalParts = ['test', 'testing', 'admin', 'user', 'demo', 'abc', 'xyz', 'fake', '123', '1234', 'qwerty', 'asdf'];
+
+    if (blockedDomains.includes(domain)) {
+        return { valid: false, reason: "Disposable or temporary email addresses are not permitted." };
+    }
+
+    if (blockedLocalParts.includes(localPart) || localPart.length < 3) {
+        return { valid: false, reason: "Please use your genuine personal or work email address." };
+    }
+
+    // 3. DNS MX Record Lookup: Verify that the email domain actually has active mail servers
+    try {
+        const mxRecords = await dns.promises.resolveMx(domain);
+        if (!mxRecords || mxRecords.length === 0) {
+            return { valid: false, reason: "This email domain does not have a valid mail server." };
+        }
+    } catch (err) {
+        return { valid: false, reason: "Could not verify email domain. Please enter a real email address." };
+    }
+
+    return { valid: true };
+};
 
 // Logic for User Registration
 export const registerUser = async (req, res) => {
     try {
-        // 1. Extract the data sent by the user from the frontend
         const { name, email, password } = req.body;
 
-        // 2. Check if any required field is missing
         if (!name || !email || !password) {
             return res.status(400).json({ message: "All fields are required!" });
         }
 
-        // 3. Check if an account with this email already exists
-        const existingUser = await User.findOne({ email });
+        if (password.length < 6) {
+            return res.status(400).json({ message: "Password must be at least 6 characters long." });
+        }
+
+        // Verify email authenticity and domain mail servers
+        const emailCheck = await verifyRealEmail(email);
+        if (!emailCheck.valid) {
+            return res.status(400).json({ message: emailCheck.reason });
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+        const existingUser = await User.findOne({ email: normalizedEmail });
         if (existingUser) {
             return res.status(400).json({ message: "This email is already registered." });
         }
 
-        // 4. Encrypt (hash) the password
-        const salt = await bcrypt.genSalt(10); // Salt increases the complexity of the password
+        const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
 
-        // 5. Save the new user to the database (with the hashed password)
         const newUser = new User({
-            name,
-            email,
+            name: name.trim(),
+            email: normalizedEmail,
             password: hashedPassword
         });
-        await newUser.save(); // Data is successfully saved to MongoDB!
+        await newUser.save();
 
-        // 6. Send a success message (without exposing the password)
         res.status(201).json({
-            message: "User successfully registered!",
+            message: "User successfully registered! You can now sign in.",
             user: {
                 id: newUser._id,
                 name: newUser.name,
@@ -52,28 +95,23 @@ export const loginUser = async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        // 1. Check if both email and password are provided
         if (!email || !password) {
             return res.status(400).json({ message: "Both email and password are required." });
         }
 
-        // 2. Search the database to see if a user exists with this email
-        const user = await User.findOne({ email });
+        const normalizedEmail = email.trim().toLowerCase();
+        const user = await User.findOne({ email: normalizedEmail });
         if (!user) {
             return res.status(400).json({ message: "No account found with this email." });
         }
 
-        // 3. Verify the password (compare the user's input with the hashed password in the database)
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(400).json({ message: "Incorrect password, please try again." });
         }
 
-        // 4. If credentials are correct, generate a JWT Token (Authorization Pass)
-        // This token will be valid for 7 days, after which the user will need to log in again
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-        // 5. Send back the success message along with the token
         res.status(200).json({
             message: "Login successful!",
             token: token,
