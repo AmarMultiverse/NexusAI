@@ -3,15 +3,40 @@ import { useNavigate } from 'react-router-dom';
 import { Send, Bot, User, LogOut, LogIn, Loader2, Plus, MessageSquare, Edit2, Check, X, Trash2, Download, Copy, Mic, MicOff } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import toast from 'react-hot-toast';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'https://nexusai-backend-966g.onrender.com';
+const GUEST_STORAGE_KEY = 'nexus_guest_messages';
+
+// Helper function to clean raw <br> tags and fix single-line markdown tables
+const formatAiMarkdown = (rawText) => {
+  if (!rawText) return '';
+  return rawText
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/\|\s*\|\s*(?=[A-Za-z0-9#*])/g, '|\n| ');
+};
 
 const Chat = () => {
+  const { user, logout, token } = useAuthStore();
+  const navigate = useNavigate();
+
   // --- 1. ALL STATES ---
-  const [messages, setMessages] = useState([]);
+  // Initialize messages from localStorage if in Guest Mode so temporary chats persist across navigation
+  const [messages, setMessages] = useState(() => {
+    if (!useAuthStore.getState().user) {
+      try {
+        const savedGuest = localStorage.getItem(GUEST_STORAGE_KEY);
+        return savedGuest ? JSON.parse(savedGuest) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [sessions, setSessions] = useState([]);
@@ -19,17 +44,14 @@ const Chat = () => {
   const [isListening, setIsListening] = useState(false);
   
   const [currentSessionId, setCurrentSessionId] = useState(localStorage.getItem('currentSessionId') || null);
-  
-  // Defaulting to Groq's flagship active model from GroqDocs
   const [selectedModel, setSelectedModel] = useState("openai/gpt-oss-120b");
   const [editingSessionId, setEditingSessionId] = useState(null);
   const [editTitle, setEditTitle] = useState("");
 
-  // --- 2. REFS & CENTRAL STORE ---
-  const { user, logout, token } = useAuthStore();
-  const navigate = useNavigate();
+  // --- 2. REFS ---
   const messagesEndRef = useRef(null);
   const isStreaming = useRef(false);
+  const isSyncingGuest = useRef(false);
   const recognitionRef = useRef(null);
 
   // --- 3. USE EFFECTS ---
@@ -39,11 +61,22 @@ const Chat = () => {
   };
   useEffect(() => { scrollToBottom(); }, [messages]);
 
+  // Persist Guest Mode messages in localStorage automatically whenever they change
+  useEffect(() => {
+    if (!user) {
+      if (messages.length > 0) {
+        localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(messages));
+      } else {
+        localStorage.removeItem(GUEST_STORAGE_KEY);
+      }
+    }
+  }, [messages, user]);
+
   // Save/delete currentSessionId in persistent storage for logged-in users
   useEffect(() => {
     if (user && currentSessionId) {
       localStorage.setItem('currentSessionId', currentSessionId);
-    } else {
+    } else if (!user) {
       localStorage.removeItem('currentSessionId');
     }
   }, [currentSessionId, user]);
@@ -64,24 +97,63 @@ const Chat = () => {
     }
   };
 
+  // Automatically sync Guest Mode chat into MongoDB when a Guest logs in or signs up
   useEffect(() => {
-    if (user && token) {
-      fetchSessions();
-    } else {
-      setSessions([]);
-      setCurrentSessionId(null);
-    }
+    const syncAndLoadUserSessions = async () => {
+      if (!user || !token) {
+        setSessions([]);
+        setCurrentSessionId(null);
+        return;
+      }
+
+      const savedGuestRaw = localStorage.getItem(GUEST_STORAGE_KEY);
+      if (savedGuestRaw && !isSyncingGuest.current) {
+        try {
+          const guestMessages = JSON.parse(savedGuestRaw);
+          if (Array.isArray(guestMessages) && guestMessages.length > 0) {
+            isSyncingGuest.current = true;
+            const res = await fetch(`${API_BASE_URL}/api/chat/sync-guest`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+              },
+              body: JSON.stringify({ guestMessages })
+            });
+
+            if (res.ok) {
+              const data = await res.json();
+              localStorage.removeItem(GUEST_STORAGE_KEY);
+              setCurrentSessionId(data.sessionId);
+              setMessages(guestMessages);
+              toast.success("Your temporary guest chat has been saved to your account!");
+            }
+          }
+        } catch (err) {
+          console.error("Failed to sync guest messages:", err);
+        } finally {
+          isSyncingGuest.current = false;
+        }
+      }
+
+      await fetchSessions();
+    };
+
+    syncAndLoadUserSessions();
   }, [user, token]);
 
   // Fetch previous chat messages when selecting a session from the sidebar
   useEffect(() => {
     const fetchChatHistory = async () => {
-      if (isStreaming.current) return;
+      if (isStreaming.current || isSyncingGuest.current) return;
 
-      if (!user || !token || !currentSessionId) {
-        if (!currentSessionId) setMessages([]);
+      if (!user || !token) return;
+
+      if (!currentSessionId) {
+        setMessages([]);
         return;
       }
+
       try {
         const res = await fetch(`${API_BASE_URL}/api/chat/history/${currentSessionId}`, {
           headers: { 'Authorization': `Bearer ${token}` }
@@ -106,6 +178,7 @@ const Chat = () => {
   const handleLogout = () => {
     logout();
     localStorage.removeItem('currentSessionId');
+    localStorage.removeItem(GUEST_STORAGE_KEY);
     setSessions([]);
     setCurrentSessionId(null);
     setMessages([]);
@@ -115,6 +188,9 @@ const Chat = () => {
   const handleNewChat = () => {
     setCurrentSessionId(null);
     setMessages([]);
+    if (!user) {
+      localStorage.removeItem(GUEST_STORAGE_KEY);
+    }
   };
 
   const handleRename = async (id) => {
@@ -292,17 +368,21 @@ const Chat = () => {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
+      let buffer = '';
 
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n\n');
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        // Keep the last partial chunk in buffer until the next read
+        buffer = events.pop() || '';
         
-        for (const line of lines) {
+        for (const eventStr of events) {
+          const line = eventStr.trim();
           if (line.startsWith('data: ')) {
-            const dataStr = line.replace('data: ', '').trim();
+            const dataStr = line.slice(6).trim();
             if (dataStr === '[DONE]') break;
             
             try {
@@ -383,7 +463,7 @@ const Chat = () => {
           {!user ? (
             <div className="px-3 py-4 text-xs text-gray-400 bg-gray-800/40 rounded-lg border border-gray-800 space-y-2">
               <p className="font-medium text-gray-300">Guest Session Active</p>
-              <p>You can chat freely! Sign in anytime to save your conversation history across devices.</p>
+              <p>Your current chat stays saved in your browser! Sign in anytime to permanently sync it to your account.</p>
             </div>
           ) : sessions.length === 0 ? (
             <p className="text-xs text-gray-500 px-2">No saved chats yet.</p>
@@ -469,7 +549,7 @@ const Chat = () => {
                 </div>
                 <div className="overflow-hidden">
                   <p className="font-medium text-sm text-gray-200 truncate">Guest Mode</p>
-                  <p className="text-xs text-gray-400 truncate">Temporary Session</p>
+                  <p className="text-xs text-gray-400 truncate">Auto-Saved Locally</p>
                 </div>
               </div>
               <button 
@@ -514,7 +594,7 @@ const Chat = () => {
               <p className="text-sm text-center max-w-md">
                 {user 
                   ? "Start a new conversation or pick from your saved history!" 
-                  : "You are chatting in instant Guest Mode. Ask anything or sign in to save your chats!"}
+                  : "You are chatting in instant Guest Mode. Ask anything—if you sign in later, this chat will automatically sync to your account!"}
               </p>
             </div>
           ) : (
@@ -525,12 +605,12 @@ const Chat = () => {
                     <Bot className="w-5 h-5 text-white" />
                   </div>
                 )}
-                <div className={`relative group p-4 rounded-2xl max-w-[80%] ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-gray-800 text-gray-200 rounded-tl-none'}`}>
+                <div className={`relative group p-4 rounded-2xl max-w-[85%] overflow-x-auto ${msg.sender === 'user' ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-gray-800 text-gray-200 rounded-tl-none'}`}>
                   
                   {msg.sender === 'ai' && !isTyping && msg.text !== '' && (
                     <button
                       onClick={() => handleCopy(msg.text, index)}
-                      className="absolute -right-10 top-2 p-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-700 hover:bg-gray-600 rounded-md text-gray-300 hover:text-white"
+                      className="absolute right-2 top-2 p-1.5 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-700/90 hover:bg-gray-600 rounded-md text-gray-300 hover:text-white z-10"
                       title="Copy Message"
                     >
                       {copiedIndex === index ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
@@ -542,7 +622,26 @@ const Chat = () => {
                   ) : (
                     <div className="prose prose-invert max-w-none text-gray-100 text-sm md:text-base leading-relaxed">
                       <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
                         components={{
+                          table({ children }) {
+                            return (
+                              <div className="overflow-x-auto my-4 rounded-lg border border-gray-700">
+                                <table className="min-w-full divide-y divide-gray-700 text-left text-sm">
+                                  {children}
+                                </table>
+                              </div>
+                            );
+                          },
+                          thead({ children }) {
+                            return <thead className="bg-gray-900/80 text-gray-200 font-semibold">{children}</thead>;
+                          },
+                          th({ children }) {
+                            return <th className="px-4 py-2.5 border-b border-gray-700">{children}</th>;
+                          },
+                          td({ children }) {
+                            return <td className="px-4 py-2 border-b border-gray-800 text-gray-300 align-top">{children}</td>;
+                          },
                           code({ node, inline, className, children, ...props }) {
                             const match = /language-(\w+)/.exec(className || '');
                             return !inline && match ? (
@@ -556,14 +655,14 @@ const Chat = () => {
                                 {String(children).replace(/\n$/, '')}
                               </SyntaxHighlighter>
                             ) : (
-                              <code className="bg-gray-800 text-blue-400 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+                              <code className="bg-gray-900 text-blue-400 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
                                 {children}
                               </code>
                             );
                           }
                         }}
                       >
-                        {msg.text}
+                        {formatAiMarkdown(msg.text)}
                       </ReactMarkdown>
                     </div>
                   )}
@@ -590,7 +689,6 @@ const Chat = () => {
               className="bg-gray-800 text-xs text-gray-300 border border-gray-700 rounded-md px-3 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer"
               disabled={isTyping}
             >
-              {/* Updated Active Production Models from GroqDocs */}
               <option value="openai/gpt-oss-120b">NexusAI GPT-OSS 120B (Flagship Reasoning)</option>
               <option value="openai/gpt-oss-20b">NexusAI GPT-OSS 20B (Ultra-Fast 1000 T/s)</option>
               <option value="qwen/qwen3.8-27b">NexusAI Qwen 3.8 27B (Coding & Logic)</option>
